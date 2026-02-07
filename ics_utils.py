@@ -10,17 +10,26 @@ class ICSValidationError(Exception):
     pass
 
 
-def stable_uid(seed: str, domain: str = "powerdashhr.com") -> str:
+def stable_uid(*parts: str, domain: str = "powerdashhr.com") -> str:
     """
     Deterministic UID for ICS invites.
-    Prevents duplicate invites if same interview is processed twice.
+    Accepts multiple parts and combines them into one stable hash.
     """
-    if not seed:
-        raise ICSValidationError("stable_uid requires a non-empty seed")
 
+    cleaned = []
+    for p in parts:
+        if p is None:
+            continue
+        p = str(p).strip()
+        if p:
+            cleaned.append(p)
+
+    if not cleaned:
+        raise ICSValidationError("stable_uid requires at least one non-empty part")
+
+    seed = "|".join(cleaned)
     digest = hashlib.md5(seed.encode("utf-8")).hexdigest()
     return f"{digest}@{domain}"
-
 
 def _format_dt(dt: datetime) -> str:
     """Return UTC datetime in ICS format."""
