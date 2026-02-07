@@ -2833,25 +2833,94 @@ def detect_slot_choice_from_text(text: str, slots: List[Dict[str, str]]) -> Opti
     """
     Detect which slot the candidate chose from their reply.
 
-    Handles:
-    1. Simple slot numbers: "3", "70", "slot 3", "#3", "option 3"
-    2. Full slot labels: "2026-01-26 01:00-01:30"
-    3. Date + time mentions
+    Robust approach:
+    - Extract slots from quoted email if present (preferred).
+    - Look for the FIRST standalone integer in the reply portion.
+    - Fall back to matching full slot label or date/time.
 
-    If the email body contains numbered slots (from the quoted original email),
-    those are extracted and used instead of the session state slots.
+    This is designed to work with messy email replies like:
+        "6"
+        "Slot 6 please"
+        "I would like option 6"
+        "6 thanks"
     """
     t = (text or "").strip()
+    if not t:
+        return None
 
     # Try to extract slots from the email body (quoted original email)
-    # This is more reliable than session state which may have changed
     email_slots = _extract_slots_from_email_body(t)
 
-    # Use email slots if we found them and they have more slots than session state
-    effective_slots = email_slots if len(email_slots) > len(slots or []) else (slots or [])
-
+    # Use email slots if they exist and are at least as complete as session slots
+    effective_slots = email_slots if len(email_slots) >= len(slots or []) else (slots or [])
     if not effective_slots:
         return None
+
+    # Extract reply portion (before quoted email content)
+    reply_text = t
+
+    # Common reply markers that indicate quoted history begins
+    for marker in [
+        "\nOn ", "\r\nOn ",
+        "\n>", "\r\n>",
+        "Sent from",  # Outlook/Mobile signatures often start quoted section
+        "From:", "Date:", "Subject:", "To:", "Cc:"
+    ]:
+        idx = reply_text.find(marker)
+        if idx > 0:
+            reply_text = reply_text[:idx]
+            break
+
+    # Normalize and split into lines
+    lines = [ln.strip() for ln in reply_text.replace("\r", "\n").split("\n")]
+    lines = [ln for ln in lines if ln]  # remove blanks
+
+    # Scan line-by-line for the FIRST valid number
+    # (most candidates reply with just "6" on its own line)
+    for ln in lines[:20]:  # only inspect top part of message
+        # Ignore obvious signature fragments
+        low = ln.lower()
+        if low.startswith(("sent from", "from:", "date:", "subject:", "to:", "cc:")):
+            continue
+
+        m = re.fullmatch(r"(\d{1,3})", ln)
+        if m:
+            slot_num = int(m.group(1))
+            if 1 <= slot_num <= len(effective_slots):
+                return effective_slots[slot_num - 1]
+
+    # If not standalone, search anywhere in reply for patterns like "slot 6"
+    m = re.search(r"\b(?:slot|option|choice|number|#)\s*(\d{1,3})\b", reply_text, re.IGNORECASE)
+    if m:
+        slot_num = int(m.group(1))
+        if 1 <= slot_num <= len(effective_slots):
+            return effective_slots[slot_num - 1]
+
+    # Next best: search entire email for first valid number (fallback)
+    m = re.search(r"\b(\d{1,3})\b", reply_text)
+    if m:
+        slot_num = int(m.group(1))
+        if 1 <= slot_num <= len(effective_slots):
+            return effective_slots[slot_num - 1]
+
+    # Method: Look for full slot label in text
+    t_lower = t.lower()
+    for s in effective_slots:
+        label = format_slot_label(s).lower()
+        if label in t_lower:
+            return s
+
+    # Method: Look for date and time that match a slot
+    m_date = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", reply_text)
+    m_time = re.search(r"\b(\d{1,2}:\d{2})\b", reply_text)
+    if m_date and m_time:
+        date = m_date.group(1)
+        start = m_time.group(1).zfill(5)
+        for s in effective_slots:
+            if s.get("date") == date and s.get("start") == start:
+                return s
+
+    return None
 
     # Method 1: Look for slot number at the START of the reply (before quoted text)
     # Email replies typically have the response at the top, then "On ... wrote:" and quoted text
@@ -5904,9 +5973,22 @@ def _create_individual_invite(
             effective_subject = f"Interview: {role_title.strip()} - {effective_name}"
         else:
             effective_subject = f"Interview with {effective_name}"
-    # Generate ICS placeholder (will be rebuilt after Teams URL is known)
-    ics_bytes = b""
-    st.session_state["last_invite_ics_bytes"] = b""
+
+    # Generate ICS fallback
+    ics_bytes = _build_ics(
+        organizer_email=organizer_email,
+        organizer_name=organizer_name,
+        attendee_emails=[a[0] for a in attendees],
+        summary=effective_subject,
+        description=agenda,
+        dtstart_utc=start_utc,
+        dtend_utc=end_utc,
+        location=("Microsoft Teams" if is_teams else (location or "Interview")),
+        url="",
+        uid_hint=f"{role_title}|{candidate_email}|{hm_email}",
+        display_timezone=candidate_timezone,
+    )
+    st.session_state["last_invite_ics_bytes"] = ics_bytes
     st.session_state["last_invite_uid"] = stable_uid(f"{role_title}|{candidate_email}|{hm_email}", organizer_email, start_utc.isoformat())
 
     client = _make_graph_client()
@@ -6066,23 +6148,6 @@ def _create_individual_invite(
         cc_recipient_emails = [a[0] for a in cc_attendees] if cc_attendees else []
         try:
             import base64
-
-            # Rebuild ICS now that we have Teams URL (Graph can return it after provisioning)
-            ics_bytes = _build_ics(
-                organizer_email=organizer_email,
-                organizer_name=organizer_name,
-                attendee_emails=[a[0] for a in attendees] + [a[0] for a in cc_attendees],
-                summary=effective_subject,
-                description=agenda,
-                dtstart_utc=start_utc,
-                dtend_utc=end_utc,
-                location=("Microsoft Teams" if is_teams else (location or "Interview")),
-                url=(teams_url or ""),
-                uid_hint=f"{role_title}|{candidate_email}|{hm_email}",
-                display_timezone=candidate_timezone,
-            )
-            st.session_state["last_invite_ics_bytes"] = ics_bytes
-
             client.send_mail(
                 subject=effective_subject,
                 body=body_html,
@@ -6092,7 +6157,7 @@ def _create_individual_invite(
                 attachment={
                     "name": "invite.ics",
                     "contentBytes": base64.b64encode(ics_bytes).decode("utf-8"),
-                    "contentType": "text/calendar; charset=utf-8; method=REQUEST",
+                    "contentType": "text/calendar",
                 },
             )
             log_structured(
@@ -6456,7 +6521,7 @@ def _create_group_invite(
                 attachment={
                     "name": "invite.ics",
                     "contentBytes": base64.b64encode(ics_bytes).decode("utf-8"),
-                    "contentType": "text/calendar; charset=utf-8; method=REQUEST",
+                    "contentType": "text/calendar",
                 },
             )
             log_structured(
