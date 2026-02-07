@@ -113,3 +113,69 @@ def build_ics_invite(
 
     ics_text = "\r\n".join(lines) + "\r\n"
     return ics_text.encode("utf-8")
+
+
+# --------------------------------------------------------------------
+# Backwards-compatible API expected by app.py
+# --------------------------------------------------------------------
+
+class ICSValidationError(ValueError):
+    """Raised when an ICS invite cannot be generated due to invalid inputs."""
+    pass
+
+
+def stable_uid(seed: str) -> str:
+    """Generate a deterministic UID for calendar invites."""
+    import hashlib
+    if not seed:
+        seed = str(uuid.uuid4())
+    h = hashlib.md5(seed.encode("utf-8")).hexdigest()
+    return f"{h}@powerdashhr.com"
+
+
+class ICSInvite:
+    """Compatibility wrapper that exposes the legacy interface used by app.py."""
+
+    def __init__(
+        self,
+        organizer_email: str,
+        organizer_name: str,
+        attendee_emails: list,
+        summary: str,
+        description: str,
+        dtstart_utc: datetime,
+        dtend_utc: datetime,
+        location: str = "",
+        url: str = "",
+        uid: str | None = None,
+        optional_attendee_emails: list | None = None,
+    ):
+        self.organizer_email = organizer_email
+        self.organizer_name = organizer_name
+        self.attendee_emails = attendee_emails or []
+        self.optional_attendee_emails = optional_attendee_emails or []
+        self.summary = summary
+        self.description = description
+        self.dtstart_utc = dtstart_utc
+        self.dtend_utc = dtend_utc
+        self.location = location
+        self.url = url
+        self.uid = uid or stable_uid(f"{summary}|{organizer_email}|{dtstart_utc.isoformat()}")
+
+    def to_bytes(self) -> bytes:
+        required = [(e, e) for e in self.attendee_emails]
+        optional = [(e, e) for e in self.optional_attendee_emails]
+
+        return build_ics_invite(
+            organizer_email=self.organizer_email,
+            organizer_name=self.organizer_name,
+            required_attendees=required,
+            optional_attendees=optional,
+            summary=self.summary,
+            description=self.description,
+            dtstart_utc=self.dtstart_utc,
+            dtend_utc=self.dtend_utc,
+            location=self.location,
+            url=self.url,
+            uid=self.uid,
+        )
