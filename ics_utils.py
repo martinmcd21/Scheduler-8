@@ -217,4 +217,82 @@ def create_ics_from_interview(
         location=location,
         url=join_url,
         uid=uid,
-    )
+def generate_cancellation_ics(
+    organizer_email: str,
+    organizer_name: str,
+    attendees: List[Tuple[str, str]],
+    optional_attendees: List[Tuple[str, str]],
+    summary: str,
+    description: str,
+    start_utc: datetime,
+    end_utc: datetime,
+    uid: str,
+    sequence: int = 1,
+    location: str = "",
+    url: str = "",
+) -> bytes:
+    """
+    Generates an ICS cancellation invite (METHOD:CANCEL).
+    Outlook requires UID + SEQUENCE to match the original invite.
+    """
+
+    if not uid:
+        raise ICSValidationError("UID is required to cancel an invite")
+
+    dtstamp = _format_dt(datetime.now(timezone.utc))
+    dtstart = _format_dt(start_utc)
+    dtend = _format_dt(end_utc)
+
+    summary = _escape_ics(summary)
+    description = _escape_ics(description or "")
+    location = _escape_ics(location or "")
+    url = _escape_ics(url or "")
+
+    if url:
+        description = f"{description}\\n\\nJoin link: {url}".strip()
+
+    lines = [
+        "BEGIN:VCALENDAR",
+        "PRODID:-//PowerDash HR//Interview Scheduler//EN",
+        "VERSION:2.0",
+        "CALSCALE:GREGORIAN",
+        "METHOD:CANCEL",
+        "BEGIN:VEVENT",
+        f"UID:{uid}",
+        f"SEQUENCE:{sequence}",
+        f"DTSTAMP:{dtstamp}",
+        f"DTSTART:{dtstart}",
+        f"DTEND:{dtend}",
+        f"SUMMARY:{summary}",
+        f"DESCRIPTION:{description}",
+        f"LOCATION:{location}",
+        "STATUS:CANCELLED",
+        f"ORGANIZER;CN={_escape_ics(organizer_name)}:mailto:{organizer_email}",
+    ]
+
+    for email, name in attendees or []:
+        email = (email or "").strip()
+        if not email:
+            continue
+        name = _escape_ics(name or email)
+        lines.append(
+            f"ATTENDEE;CN={name};ROLE=REQ-PARTICIPANT:mailto:{email}"
+        )
+
+    for email, name in optional_attendees or []:
+        email = (email or "").strip()
+        if not email:
+            continue
+        name = _escape_ics(name or email)
+        lines.append(
+            f"ATTENDEE;CN={name};ROLE=OPT-PARTICIPANT:mailto:{email}"
+        )
+
+    if url:
+        lines.append(f"URL:{url}")
+
+    lines.append("END:VEVENT")
+    lines.append("END:VCALENDAR")
+
+    ics_text = "\r\n".join(lines) + "\r\n"
+    return ics_text.encode("utf-8")    
