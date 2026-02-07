@@ -12,8 +12,8 @@ class ICSValidationError(Exception):
 
 def stable_uid(seed: str, domain: str = "powerdashhr.com") -> str:
     """
-    Create a deterministic UID suitable for ICS invites.
-    This prevents duplicate meeting creation if the same interview is processed twice.
+    Deterministic UID for ICS invites.
+    Prevents duplicate invites if same interview is processed twice.
     """
     if not seed:
         raise ICSValidationError("stable_uid requires a non-empty seed")
@@ -36,9 +36,9 @@ def _escape_ics(text: str) -> str:
         return ""
     return (
         text.replace("\\", "\\\\")
-            .replace(";", r"\;")
-            .replace(",", r"\,")
-            .replace("\n", r"\n")
+        .replace(";", r"\;")
+        .replace(",", r"\,")
+        .replace("\n", r"\n")
     )
 
 
@@ -54,12 +54,13 @@ def build_ics_invite(
     location: str = "",
     url: str = "",
     uid: Optional[str] = None,
+    method: str = "REQUEST",
+    status: str = "CONFIRMED",
+    sequence: int = 0,
 ) -> bytes:
     """
-    Generate a proper RFC 5545 ICS meeting invite.
-
-    required_attendees: list of (email, display_name)
-    optional_attendees: list of (email, display_name)
+    RFC 5545 ICS invite generator.
+    Supports REQUEST and CANCEL methods.
     """
 
     if not organizer_email:
@@ -86,21 +87,25 @@ def build_ics_invite(
     if url:
         description = f"{description}\\n\\nJoin link: {url}".strip()
 
+    method = (method or "REQUEST").upper()
+    status = (status or "CONFIRMED").upper()
+
     lines = [
         "BEGIN:VCALENDAR",
         "PRODID:-//PowerDash HR//Interview Scheduler//EN",
         "VERSION:2.0",
         "CALSCALE:GREGORIAN",
-        "METHOD:REQUEST",
+        f"METHOD:{method}",
         "BEGIN:VEVENT",
         f"UID:{uid}",
+        f"SEQUENCE:{sequence}",
         f"DTSTAMP:{dtstamp}",
         f"DTSTART:{dtstart}",
         f"DTEND:{dtend}",
         f"SUMMARY:{summary}",
         f"DESCRIPTION:{description}",
         f"LOCATION:{location}",
-        "STATUS:CONFIRMED",
+        f"STATUS:{status}",
         "TRANSP:OPAQUE",
         f"ORGANIZER;CN={_escape_ics(organizer_name)}:mailto:{organizer_email}",
     ]
@@ -130,14 +135,15 @@ def build_ics_invite(
     if url:
         lines.append(f"URL:{url}")
 
-    # Reminder alarm
-    lines.extend([
-        "BEGIN:VALARM",
-        "TRIGGER:-PT15M",
-        "ACTION:DISPLAY",
-        "DESCRIPTION:Interview Reminder",
-        "END:VALARM",
-    ])
+    # Alarm only makes sense for REQUEST
+    if method == "REQUEST":
+        lines.extend([
+            "BEGIN:VALARM",
+            "TRIGGER:-PT15M",
+            "ACTION:DISPLAY",
+            "DESCRIPTION:Interview Reminder",
+            "END:VALARM",
+        ])
 
     lines.append("END:VEVENT")
     lines.append("END:VCALENDAR")
@@ -149,7 +155,7 @@ def build_ics_invite(
 @dataclass
 class ICSInvite:
     """
-    Backwards compatible wrapper class so existing app.py code still works.
+    Backwards compatible wrapper class.
     """
 
     organizer_email: str
@@ -179,6 +185,9 @@ class ICSInvite:
             location=self.location,
             url=self.url,
             uid=self.uid,
+            method="REQUEST",
+            status="CONFIRMED",
+            sequence=0,
         )
 
 
@@ -194,11 +203,10 @@ def create_ics_from_interview(
     location: str = "",
     join_url: str = "",
     uid_seed: Optional[str] = None,
+    sequence: int = 0,
 ) -> bytes:
     """
-    This matches what app.py expects.
-
-    Returns: ICS bytes suitable for attaching to an email via Graph API.
+    Main helper used by app.py for generating meeting invites.
     """
 
     uid = None
@@ -217,6 +225,12 @@ def create_ics_from_interview(
         location=location,
         url=join_url,
         uid=uid,
+        method="REQUEST",
+        status="CONFIRMED",
+        sequence=sequence,
+    )
+
+
 def generate_cancellation_ics(
     organizer_email: str,
     organizer_name: str,
@@ -232,68 +246,26 @@ def generate_cancellation_ics(
     url: str = "",
 ) -> bytes:
     """
-    Generates an ICS cancellation invite (METHOD:CANCEL).
-    Outlook requires UID + SEQUENCE to match the original invite.
+    Generate an ICS cancellation invite (METHOD:CANCEL).
+    Outlook requires UID + SEQUENCE.
     """
 
     if not uid:
         raise ICSValidationError("UID is required to cancel an invite")
 
-    dtstamp = _format_dt(datetime.now(timezone.utc))
-    dtstart = _format_dt(start_utc)
-    dtend = _format_dt(end_utc)
-
-    summary = _escape_ics(summary)
-    description = _escape_ics(description or "")
-    location = _escape_ics(location or "")
-    url = _escape_ics(url or "")
-
-    if url:
-        description = f"{description}\\n\\nJoin link: {url}".strip()
-
-    lines = [
-        "BEGIN:VCALENDAR",
-        "PRODID:-//PowerDash HR//Interview Scheduler//EN",
-        "VERSION:2.0",
-        "CALSCALE:GREGORIAN",
-        "METHOD:CANCEL",
-        "BEGIN:VEVENT",
-        f"UID:{uid}",
-        f"SEQUENCE:{sequence}",
-        f"DTSTAMP:{dtstamp}",
-        f"DTSTART:{dtstart}",
-        f"DTEND:{dtend}",
-        f"SUMMARY:{summary}",
-        f"DESCRIPTION:{description}",
-        f"LOCATION:{location}",
-        "STATUS:CANCELLED",
-        f"ORGANIZER;CN={_escape_ics(organizer_name)}:mailto:{organizer_email}",
-    ]
-
-    for email, name in attendees or []:
-        email = (email or "").strip()
-        if not email:
-            continue
-        name = _escape_ics(name or email)
-        lines.append(
-            f"ATTENDEE;CN={name};ROLE=REQ-PARTICIPANT:mailto:{email}"
-        )
-
-    for email, name in optional_attendees or []:
-        email = (email or "").strip()
-        if not email:
-            continue
-        name = _escape_ics(name or email)
-        lines.append(
-            f"ATTENDEE;CN={name};ROLE=OPT-PARTICIPANT:mailto:{email}"
-        )
-
-    if url:
-        lines.append(f"URL:{url}")
-
-    lines.append("END:VEVENT")
-    lines.append("END:VCALENDAR")
-
-    ics_text = "\r\n".join(lines) + "\r\n"
-    return ics_text.encode("utf-8")    
-)
+    return build_ics_invite(
+        organizer_email=organizer_email,
+        organizer_name=organizer_name,
+        required_attendees=attendees,
+        optional_attendees=optional_attendees,
+        summary=summary,
+        description=description,
+        dtstart_utc=start_utc,
+        dtend_utc=end_utc,
+        location=location,
+        url=url,
+        uid=uid,
+        method="CANCEL",
+        status="CANCELLED",
+        sequence=sequence,
+    )
