@@ -5904,22 +5904,9 @@ def _create_individual_invite(
             effective_subject = f"Interview: {role_title.strip()} - {effective_name}"
         else:
             effective_subject = f"Interview with {effective_name}"
-
-    # Generate ICS fallback
-    ics_bytes = _build_ics(
-        organizer_email=organizer_email,
-        organizer_name=organizer_name,
-        attendee_emails=[a[0] for a in attendees],
-        summary=effective_subject,
-        description=agenda,
-        dtstart_utc=start_utc,
-        dtend_utc=end_utc,
-        location=("Microsoft Teams" if is_teams else (location or "Interview")),
-        url="",
-        uid_hint=f"{role_title}|{candidate_email}|{hm_email}",
-        display_timezone=candidate_timezone,
-    )
-    st.session_state["last_invite_ics_bytes"] = ics_bytes
+    # Generate ICS placeholder (will be rebuilt after Teams URL is known)
+    ics_bytes = b""
+    st.session_state["last_invite_ics_bytes"] = b""
     st.session_state["last_invite_uid"] = stable_uid(f"{role_title}|{candidate_email}|{hm_email}", organizer_email, start_utc.isoformat())
 
     client = _make_graph_client()
@@ -6079,6 +6066,23 @@ def _create_individual_invite(
         cc_recipient_emails = [a[0] for a in cc_attendees] if cc_attendees else []
         try:
             import base64
+
+            # Rebuild ICS now that we have Teams URL (Graph can return it after provisioning)
+            ics_bytes = _build_ics(
+                organizer_email=organizer_email,
+                organizer_name=organizer_name,
+                attendee_emails=[a[0] for a in attendees] + [a[0] for a in cc_attendees],
+                summary=effective_subject,
+                description=agenda,
+                dtstart_utc=start_utc,
+                dtend_utc=end_utc,
+                location=("Microsoft Teams" if is_teams else (location or "Interview")),
+                url=(teams_url or ""),
+                uid_hint=f"{role_title}|{candidate_email}|{hm_email}",
+                display_timezone=candidate_timezone,
+            )
+            st.session_state["last_invite_ics_bytes"] = ics_bytes
+
             client.send_mail(
                 subject=effective_subject,
                 body=body_html,
@@ -6088,7 +6092,7 @@ def _create_individual_invite(
                 attachment={
                     "name": "invite.ics",
                     "contentBytes": base64.b64encode(ics_bytes).decode("utf-8"),
-                    "contentType": "text/calendar",
+                    "contentType": "text/calendar; charset=utf-8; method=REQUEST",
                 },
             )
             log_structured(
@@ -6452,7 +6456,7 @@ def _create_group_invite(
                 attachment={
                     "name": "invite.ics",
                     "contentBytes": base64.b64encode(ics_bytes).decode("utf-8"),
-                    "contentType": "text/calendar",
+                    "contentType": "text/calendar; charset=utf-8; method=REQUEST",
                 },
             )
             log_structured(
