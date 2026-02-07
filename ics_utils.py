@@ -296,3 +296,4 @@ def generate_cancellation_ics(
 
     ics_text = "\r\n".join(lines) + "\r\n"
     return ics_text.encode("utf-8")    
+)
